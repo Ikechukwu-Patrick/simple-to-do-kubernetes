@@ -15,37 +15,40 @@ env:
 jobs:
   deploy:
     runs-on: ubuntu-latest
-    timeout-minutes: 20
+    timeout-minutes: 30  # Increased timeout
 
     services:
       localstack:
         image: localstack/localstack-pro
         ports:
-          - "4566:4566"  # Core services
-          - "4510:4510"  # ECR service
+          - "4566:4566"
+          - "4510:4510"
         env:
           SERVICES: ecr,ecs,iam,s3
           DEBUG: "1"
           LOCALSTACK_APIKEY: ${{ secrets.LOCALSTACK_APIKEY }}
           DOCKER_HOST: unix:///var/run/docker.sock
-          # Critical fixes below:
-          PERSISTENCE: "0"  # Disable persistence to prevent /tmp conflicts
-          HOST_TMP_FOLDER: "/tmp/localstack-tmp"  # Alternative temp directory
-          INIT_SCRIPTS_PATH: "/dev/null"  # Disable init scripts
+          PERSISTENCE: "0"
+          HOST_TMP_FOLDER: "/tmp/localstack-tmp"
+          INIT_SCRIPTS_PATH: "/dev/null"
         volumes:
           - "/var/run/docker.sock:/var/run/docker.sock"
         options: >-
-          --health-cmd="curl -f http://localhost:4566/_localstack/health || exit 1"
-          --health-interval=10s
-          --health-timeout=5s
-          --health-retries=10
-          --tmpfs /tmp/localstack:rw,exec  # Use tmpfs instead of volume
+          --health-cmd "curl -f http://localhost:4566/_localstack/health || exit 1"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 10
+          --tmpfs /tmp/localstack:rw,exec
 
     steps:
+      - name: Pre-pull LocalStack image
+        run: |
+          docker pull localstack/localstack-pro
+          docker tag localstack/localstack-pro localstack-pro-cached
+
       - name: Checkout code
         uses: actions/checkout@v4
 
-      # ===== AWS CREDENTIALS SETUP =====
       - name: Configure AWS credentials
         run: |
           mkdir -p ~/.aws
@@ -61,59 +64,43 @@ jobs:
           aws_secret_access_key = test
           EOF
 
-      # ===== WAIT FOR LOCALSTACK =====
-      - name: Verify LocalStack readiness
+      - name: Verify LocalStack
         run: |
-          echo "Waiting for LocalStack services..."
           for i in {1..30}; do
             if curl -s http://localhost:4566/_localstack/health | grep -q '"ecr": "available"'; then
-              echo "✅ ECR service available"
+              echo "✅ LocalStack ready"
               exit 0
             fi
             sleep 5
           done
-          echo "❌ LocalStack failed to start"
-          docker logs $(docker ps -aqf "name=localstack")
+          echo "❌ LocalStack failed"
           exit 1
 
-      # ===== DOCKER IMAGE HANDLING =====
-      - name: Pull from DockerHub
+      - name: Pull and push image
         run: |
           docker pull ${{ env.DOCKERHUB_IMAGE }}
-          docker tag ${{ env.DOCKERHUB_IMAGE }} ${{ env.ECR_REPO_NAME }}:latest
-
-      - name: Push to LocalStack ECR
-        run: |
           aws --endpoint-url=${{ env.LOCALSTACK_ENDPOINT }} ecr create-repository \
-            --repository-name ${{ env.ECR_REPO_NAME }} || echo "Repository exists"
-          
-          ECR_PASSWORD=$(aws --endpoint-url=${{ env.LOCALSTACK_ENDPOINT }} ecr get-login-password)
-          echo $ECR_PASSWORD | docker login --username AWS --password-stdin localhost:4510
-          
-          docker tag ${{ env.ECR_REPO_NAME }}:latest localhost:4510/${{ env.ECR_REPO_NAME }}:latest
+            --repository-name ${{ env.ECR_REPO_NAME }} || true
+          aws --endpoint-url=${{ env.LOCALSTACK_ENDPOINT }} ecr get-login-password | \
+            docker login --username AWS --password-stdin localhost:4510
+          docker tag ${{ env.DOCKERHUB_IMAGE }} localhost:4510/${{ env.ECR_REPO_NAME }}:latest
           docker push localhost:4510/${{ env.ECR_REPO_NAME }}:latest
 
-      # ===== ECS DEPLOYMENT =====
       - name: Deploy to ECS
         run: |
-          # Register task definition
           cat <<EOF > task-definition.json
           {
             "family": "${{ env.ECS_SERVICE_NAME }}",
             "networkMode": "awsvpc",
-            "containerDefinitions": [
-              {
-                "name": "${{ env.ECR_REPO_NAME }}",
-                "image": "localhost:4510/${{ env.ECR_REPO_NAME }}:latest",
-                "essential": true,
-                "portMappings": [
-                  {
-                    "containerPort": 8084,
-                    "hostPort": 8084
-                  }
-                ]
-              }
-            ],
+            "containerDefinitions": [{
+              "name": "${{ env.ECR_REPO_NAME }}",
+              "image": "localhost:4510/${{ env.ECR_REPO_NAME }}:latest",
+              "essential": true,
+              "portMappings": [{
+                "containerPort": 8084,
+                "hostPort": 8084
+              }]
+            }],
             "requiresCompatibilities": ["FARGATE"],
             "cpu": "256",
             "memory": "512"
@@ -123,7 +110,6 @@ jobs:
           aws --endpoint-url=${{ env.LOCALSTACK_ENDPOINT }} ecs register-task-definition \
             --cli-input-json file://task-definition.json
           
-          # Create service if doesn't exist
           if ! aws --endpoint-url=${{ env.LOCALSTACK_ENDPOINT }} ecs describe-services \
             --cluster ${{ env.ECS_CLUSTER_NAME }} \
             --services ${{ env.ECS_SERVICE_NAME }} &>/dev/null; then
@@ -134,7 +120,6 @@ jobs:
               --desired-count 1 \
               --launch-type FARGATE
           else
-            # Update existing service
             aws --endpoint-url=${{ env.LOCALSTACK_ENDPOINT }} ecs update-service \
               --cluster ${{ env.ECS_CLUSTER_NAME }} \
               --service ${{ env.ECS_SERVICE_NAME }} \
@@ -142,17 +127,8 @@ jobs:
               --force-new-deployment
           fi
 
-      # ===== VERIFICATION =====
       - name: Verify deployment
         run: |
-          echo "Waiting for service to stabilize..."
-          sleep 30  # Extra time for Java app startup
-          
-          echo "Current ECS tasks:"
-          aws --endpoint-url=${{ env.LOCALSTACK_ENDPOINT }} ecs list-tasks \
-            --cluster ${{ env.ECS_CLUSTER_NAME }} \
-            --service ${{ env.ECS_SERVICE_NAME }}
-          
-          echo "Application health check:"
+          sleep 30
           curl -v -f http://localhost:8084/actuator/health || \
             (echo "❌ Health check failed"; exit 1)
