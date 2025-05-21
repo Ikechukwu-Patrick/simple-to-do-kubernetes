@@ -39,7 +39,6 @@ jobs:
           mvn clean package -DskipTests
           echo "Build completed successfully"
 
-      # --- STAGE 2: Docker Operations ---
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v2
 
