@@ -24,9 +24,9 @@ jobs:
           - "4566:4566"     # LocalStack core
           - "4510:4510"     # ECR service
         env:
-          - SERVICES=ecr,ecs
-          - DEBUG=1
-          - EAGER_SERVICE_LOADING=1  # Pre-load services
+          SERVICES: ecr,ecs  # CHANGED FROM SEQUENCE TO MAPPING
+          DEBUG: "1"         # CHANGED FROM SEQUENCE TO MAPPING
+          EAGER_SERVICE_LOADING: "1"  # CHANGED FROM SEQUENCE TO MAPPING
 
     steps:
       - name: Checkout code
