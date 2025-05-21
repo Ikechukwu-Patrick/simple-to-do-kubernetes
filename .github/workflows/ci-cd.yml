@@ -24,15 +24,20 @@ jobs:
 
       - name: Decode and set up kubeconfig
         run: |
-          mkdir -p $HOME/.kube
-          echo "${KUBE_CONFIG_DATA}" | base64 --decode > $HOME/.kube/config
+          mkdir -p ~/.kube
+          echo "${KUBE_CONFIG_DATA}" | base64 --decode > ~/.kube/config
+
+      - name: Test cluster connection
+        run: kubectl cluster-info
+        env:
+          KUBECONFIG: /home/runner/.kube/config
 
       - name: Apply Kubernetes manifests
         run: kubectl apply -f k8s/
         env:
-          KUBECONFIG: $HOME/.kube/config
+          KUBECONFIG: /home/runner/.kube/config
 
       - name: Force deployment to pull latest image
         run: kubectl rollout restart deployment/todo-app
         env:
-          KUBECONFIG: $HOME/.kube/config
+          KUBECONFIG: /home/runner/.kube/config
