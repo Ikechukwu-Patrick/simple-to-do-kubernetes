@@ -1,0 +1,121 @@
+name: Deploy Java TodoApp to ECS using LocalStack
+
+on:
+  push:
+    branches: [ "master" ]
+
+env:
+  LOCALSTACK_ENDPOINT: http://localhost:4566
+  ECR_REPO_NAME: todo-app
+  ECS_CLUSTER_NAME: todo-cluster
+  ECS_TASK_DEFINITION: todo-task
+  AWS_DEFAULT_REGION: us-east-1
+  APP_PORT: 8084  # Your Java app's port
+  DOCKERHUB_IMAGE: ike20743/todo-app:latest
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+
+    services:
+      localstack:
+        image: localstack/localstack
+        ports:
+          - "4566:4566"     # LocalStack core
+          - "4510:4510"     # ECR service
+        env:
+          - SERVICES=ecr,ecs
+          - DEBUG=1
+          - EAGER_SERVICE_LOADING=1  # Pre-load services
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      # ===== SETUP AWS CLI FOR LOCALSTACK =====
+      - name: Configure AWS CLI
+        run: |
+          aws configure set aws_access_key_id test
+          aws configure set aws_secret_access_key test
+          aws configure set region ${{ env.AWS_DEFAULT_REGION }}
+          aws configure set output json
+
+      # ===== PULL LATEST DOCKERHUB IMAGE =====
+      - name: Pull latest Docker Hub image
+        run: |
+          docker pull ${{ env.DOCKERHUB_IMAGE }}
+          docker tag ${{ env.DOCKERHUB_IMAGE }} ${{ env.ECR_REPO_NAME }}:latest
+
+      # ===== PUSH TO LOCALSTACK ECR =====
+      - name: Setup LocalStack ECR
+        run: |
+          aws --endpoint-url=${{ env.LOCALSTACK_ENDPOINT }} ecr create-repository \
+            --repository-name ${{ env.ECR_REPO_NAME }} || true
+          ECR_PASSWORD=$(aws --endpoint-url=${{ env.LOCALSTACK_ENDPOINT }} ecr get-login-password)
+          echo $ECR_PASSWORD | docker login --username AWS --password-stdin localhost:4510
+
+      - name: Tag and push to ECR
+        run: |
+          docker tag ${{ env.ECR_REPO_NAME }}:latest localhost:4510/${{ env.ECR_REPO_NAME }}:latest
+          docker push localhost:4510/${{ env.ECR_REPO_NAME }}:latest
+
+      # ===== DEPLOY TO ECS =====
+      - name: Create ECS cluster
+        run: |
+          aws --endpoint-url=${{ env.LOCALSTACK_ENDPOINT }} ecs create-cluster \
+            --cluster-name ${{ env.ECS_CLUSTER_NAME }}
+
+      - name: Register task definition
+        run: |
+          cat <<EOF > task-definition.json
+          {
+            "family": "${{ env.ECS_TASK_DEFINITION }}",
+            "networkMode": "bridge",
+            "containerDefinitions": [
+              {
+                "name": "${{ env.ECR_REPO_NAME }}",
+                "image": "localhost:4510/${{ env.ECR_REPO_NAME }}:latest",
+                "essential": true,
+                "portMappings": [
+                  {
+                    "containerPort": ${{ env.APP_PORT }},
+                    "hostPort": ${{ env.APP_PORT }}
+                  }
+                ],
+                "environment": [
+                  {
+                    "name": "SPRING_APPLICATION_JSON",
+                    "value": "{\"server\":{\"port\":${{ env.APP_PORT }}}}"
+                  }
+                ]
+              }
+            ],
+            "requiresCompatibilities": ["EC2"],
+            "cpu": "256",
+            "memory": "512"
+          }
+          EOF
+          aws --endpoint-url=${{ env.LOCALSTACK_ENDPOINT }} ecs register-task-definition \
+            --cli-input-json file://task-definition.json
+
+      - name: Run ECS task
+        id: run_task
+        run: |
+          TASK_ARN=$(aws --endpoint-url=${{ env.LOCALSTACK_ENDPOINT }} ecs run-task \
+            --cluster ${{ env.ECS_CLUSTER_NAME }} \
+            --task-definition ${{ env.ECS_TASK_DEFINITION }} \
+            --launch-type EC2 \
+            --query 'tasks[0].taskArn' \
+            --output text)
+          echo "task_arn=$TASK_ARN" >> $GITHUB_OUTPUT
+          aws --endpoint-url=${{ env.LOCALSTACK_ENDPOINT }} ecs wait tasks-running \
+            --cluster ${{ env.ECS_CLUSTER_NAME }} \
+            --tasks $TASK_ARN
+
+      # ===== VERIFY DEPLOYMENT =====
+      - name: Check application health
+        run: |
+          echo "Waiting for app to start on port ${{ env.APP_PORT }}..."
+          sleep 15  # Give container time to start
+          curl -f http://localhost:${{ env.APP_PORT }}/actuator/health || \
+            (echo "Health check failed!"; exit 1)
