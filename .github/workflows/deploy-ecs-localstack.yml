@@ -16,6 +16,7 @@ env:
 jobs:
   deploy:
     runs-on: ubuntu-latest
+    timeout-minutes: 20  # Extended timeout
 
     services:
       localstack:
@@ -28,14 +29,44 @@ jobs:
           DEBUG: "1"
           LOCALSTACK_APIKEY: ${{ secrets.LOCALSTACK_APIKEY }}
           DOCKER_HOST: unix:///var/run/docker.sock
+          PERSISTENCE: "1"
+          LS_LOG: "debug"
         volumes:
           - "/var/run/docker.sock:/var/run/docker.sock"
+          - "localstack_data:/tmp/localstack"
+        options: >-
+          --health-cmd="curl -f http://localhost:4566/_localstack/health || exit 1"
+          --health-interval=10s
+          --health-timeout=5s
+          --health-retries=10
+          --name=localstack-main
 
     steps:
+      - name: Check Docker environment
+        run: |
+          docker version
+          docker info
+
       - name: Checkout code
         uses: actions/checkout@v4
 
-      # ===== SETUP =====
+      # ===== LOCALSTACK INITIALIZATION =====
+      - name: Wait for LocalStack readiness
+        run: |
+          echo "Waiting for LocalStack services..."
+          for i in {1..30}; do
+            if curl -s http://localhost:4566/_localstack/health | grep -q '"ecr": "available"'; then
+              echo "✅ LocalStack services are ready"
+              exit 0
+            fi
+            echo "Attempt $i/30 - Waiting for services..."
+            sleep 5
+          done
+          echo "❌ LocalStack failed to initialize"
+          curl -v http://localhost:4566/_localstack/health
+          exit 1
+
+      # ===== AWS CONFIGURATION =====
       - name: Configure AWS CLI
         run: |
           aws configure set aws_access_key_id test
@@ -43,16 +74,16 @@ jobs:
           aws configure set region ${{ env.AWS_DEFAULT_REGION }}
           aws configure set output json
 
-      # ===== IMAGE HANDLING =====
-      - name: Pull latest Docker Hub image
+      # ===== IMAGE MANAGEMENT =====
+      - name: Pull latest Docker image
         run: |
           docker pull ${{ env.DOCKERHUB_IMAGE }}
           docker tag ${{ env.DOCKERHUB_IMAGE }} ${{ env.ECR_REPO_NAME }}:latest
 
-      - name: Setup ECR repository
+      - name: Set up ECR repository
         run: |
           aws --endpoint-url=${{ env.LOCALSTACK_ENDPOINT }} ecr create-repository \
-            --repository-name ${{ env.ECR_REPO_NAME }} || true
+            --repository-name ${{ env.ECR_REPO_NAME }} || echo "Repository may already exist"
 
       - name: Login to ECR
         run: |
@@ -105,25 +136,49 @@ jobs:
 
       - name: Run ECS task
         run: |
-          aws --endpoint-url=${{ env.LOCALSTACK_ENDPOINT }} ecs run-task \
+          TASK_ARN=$(aws --endpoint-url=${{ env.LOCALSTACK_ENDPOINT }} ecs run-task \
             --cluster ${{ env.ECS_CLUSTER_NAME }} \
             --task-definition ${{ env.ECS_TASK_DEFINITION }} \
             --launch-type FARGATE \
-            --network-configuration "awsvpcConfiguration={subnets=[subnet-1234],securityGroups=[sg-1234]}"
-
-      # ===== DEBUGGING =====
-      - name: Check running containers
-        run: docker ps -a
-
-      - name: Check ECS tasks
-        run: |
-          aws --endpoint-url=${{ env.LOCALSTACK_ENDPOINT }} ecs list-tasks \
-            --cluster ${{ env.ECS_CLUSTER_NAME }}
+            --network-configuration "awsvpcConfiguration={subnets=[subnet-1234],securityGroups=[sg-1234]}" \
+            --query 'tasks[0].taskArn' --output text)
+          
+          echo "Waiting for task to start..."
+          aws --endpoint-url=${{ env.LOCALSTACK_ENDPOINT }} ecs wait tasks-running \
+            --cluster ${{ env.ECS_CLUSTER_NAME }} \
+            --tasks $TASK_ARN
 
       # ===== VERIFICATION =====
       - name: Verify deployment
         run: |
-          echo "Waiting for app to start..."
-          sleep 30
-          curl -v http://localhost:${{ env.APP_PORT }}/actuator/health || \
-            (echo "Health check failed!"; exit 1)
+          echo "Waiting for application to start..."
+          sleep 30  # Extended wait for Java app
+          
+          echo "Checking running containers:"
+          docker ps -a
+          
+          echo "Checking ECS tasks:"
+          aws --endpoint-url=${{ env.LOCALSTACK_ENDPOINT }} ecs list-tasks \
+            --cluster ${{ env.ECS_CLUSTER_NAME }}
+          
+          echo "Testing application health:"
+          curl -v -f http://localhost:${{ env.APP_PORT }}/actuator/health || \
+            (echo "❌ Health check failed"; exit 1)
+          echo "✅ Deployment successful"
+
+      # ===== DEBUGGING (ON FAILURE) =====
+      - name: Collect logs on failure
+        if: ${{ failure() }}
+        run: |
+          echo "=== LocalStack logs ==="
+          docker logs localstack-main
+          
+          echo "=== Running containers ==="
+          docker ps -a
+          
+          echo "=== ECS task status ==="
+          aws --endpoint-url=${{ env.LOCALSTACK_ENDPOINT }} ecs describe-tasks \
+            --cluster ${{ env.ECS_CLUSTER_NAME }} \
+            --tasks $(aws --endpoint-url=${{ env.LOCALSTACK_ENDPOINT }} ecs list-tasks \
+              --cluster ${{ env.ECS_CLUSTER_NAME }} \
+              --query 'taskArns' --output text)
