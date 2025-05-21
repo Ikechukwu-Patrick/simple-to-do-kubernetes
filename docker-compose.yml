@@ -11,24 +11,6 @@ services:
     networks:
       - todo-net
 
-  app:
-    build: .
-    container_name: todo-app
-    depends_on:
-      - db
-    ports:
-      - "8082:8082"
-    environment:
-      SPRING_DATASOURCE_URL: jdbc:postgresql://db:5432/tododb
-      SPRING_DATASOURCE_USERNAME: postgres
-      SPRING_DATASOURCE_PASSWORD: postgres
-      AWS_ACCESS_KEY_ID: test
-      AWS_SECRET_ACCESS_KEY: test
-      AWS_REGION: us-east-1
-      S3_BUCKET_NAME: todo-app-bucket
-    networks:
-      - todo-net
-
 networks:
   todo-net:
     driver: bridge

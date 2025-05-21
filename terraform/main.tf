@@ -2,57 +2,99 @@ terraform {
   required_providers {
     aws = {
       source  = "hashicorp/aws"
-      version = "~> 5.0"
+      version = "~> 4.0"
     }
-  }
-
-  backend "s3" {
-    bucket         = "tfstate-localstack"
-    key            = "terraform.tfstate"
-    region         = "us-east-1"
-    dynamodb_table = "tf-locks"
-    # LocalStack endpoint override
-    endpoints {
-      s3 = "http://localhost:4566"
-    }
-    skip_credentials_validation = true
-    skip_metadata_api_check     = true
-    force_path_style            = true
   }
 }
 
 provider "aws" {
+  access_key                  = "test"
+  secret_key                  = "test"
   region                      = "us-east-1"
+
+  # LocalStack configuration (pointing to your native LocalStack)
   skip_credentials_validation = true
-  skip_requesting_account_id  = true
   skip_metadata_api_check     = true
-  s3_use_path_style           = true
+  skip_requesting_account_id  = true
 
   endpoints {
-    ec2       = "http://localhost:4566"
-    eks       = "http://localhost:4566"
-    iam       = "http://localhost:4566"
-    s3        = "http://localhost:4566"
-    ecr       = "http://localhost:4566"
-    ecs       = "http://localhost:4566"
+    ecr     = "http://localhost:4566"
+    ecs     = "http://localhost:4566"
+    iam     = "http://localhost:4566"
+    logs    = "http://localhost:4566"
+    s3      = "http://localhost:4566"
   }
 }
 
-module "vpc" {
-  source = "./vpc"
+resource "aws_ecr_repository" "todo_repo" {
+  name = "todo-app"
 }
 
-module "s3" {
-  source = "./s3"
+resource "aws_ecs_cluster" "todo_cluster" {
+  name = "todo-cluster"
 }
 
-module "iam" {
-  source = "./iam"
-  vpc_id = module.vpc.vpc_id
+resource "aws_ecs_task_definition" "todo_task" {
+  family                   = "todo-task"
+  network_mode             = "awsvpc"
+  requires_compatibilities = ["FARGATE"]
+  cpu                      = 256
+  memory                   = 512
+  execution_role_arn       = aws_iam_role.ecs_task_execution_role.arn
+
+  container_definitions = jsonencode([{
+    name      = "todo-container"
+    image     = "${aws_ecr_repository.todo_repo.repository_url}:latest"
+    essential = true
+    portMappings = [{
+      containerPort = 8084
+      hostPort      = 8084
+    }]
+    environment = [
+      { name = "SPRING_DATASOURCE_URL", value = "jdbc:postgresql://host.docker.internal:5436/tododb" },
+      { name = "SPRING_DATASOURCE_USERNAME", value = "postgres" },
+      { name = "SPRING_DATASOURCE_PASSWORD", value = "postgres" },
+      { name = "AWS_ACCESS_KEY_ID", value = "test" },
+      { name = "AWS_SECRET_ACCESS_KEY", value = "test" },
+      { name = "AWS_REGION", value = "us-east-1" }
+    ]
+  }])
 }
 
-module "eks" {
-  source     = "./eks"
-  vpc_id     = module.vpc.vpc_id
-  subnet_ids = module.vpc.private_subnets
+resource "aws_ecs_service" "todo_service" {
+  name            = "todo-service"
+  cluster         = aws_ecs_cluster.todo_cluster.id
+  task_definition = aws_ecs_task_definition.todo_task.arn
+  desired_count   = 1
+  launch_type     = "FARGATE"
+}
+
+resource "aws_iam_role" "ecs_task_execution_role" {
+  name = "ecs-task-execution-role"
+
+  assume_role_policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [{
+      Action    = "sts:AssumeRole"
+      Effect    = "Allow"
+      Principal = {
+        Service = "ecs-tasks.amazonaws.com"
+      }
+    }]
+  })
+}
+
+resource "aws_iam_role_policy_attachment" "ecs_task_execution_role_policy" {
+  role       = aws_iam_role.ecs_task_execution_role.name
+  policy_arn = "arn:aws:iam::aws:policy/service-role/AmazonECSTaskExecutionRolePolicy"
+}
+container_definitions = jsonencode([{
+  image = "ike20743/todo-app:latest"  # ← Docker Hub reference
+}])
+resource "aws_ecs_task_definition" "todo_task" {
+  container_definitions = jsonencode([{
+    image = "ike20743/todo-app:latest"  # ← Must match DOCKERHUB_IMAGE
+    # (rest of your config)
+  }])
+  family = "default"
 }
