@@ -1,0 +1,11 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: todo-config
+data:
+  SPRING_DATASOURCE_URL: "jdbc:postgresql://localhost:5432/tododb"
+  SPRING_DATASOURCE_USERNAME: "postgres"
+  AWS_ACCESS_KEY_ID: "test"
+  AWS_REGION: "us-east-1"
+  S3_ENDPOINT: "http://your-localstack-host:4566"
+  S3_BUCKET_NAME: "todo-app-bucket"

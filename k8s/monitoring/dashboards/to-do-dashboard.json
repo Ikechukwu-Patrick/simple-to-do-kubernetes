@@ -1,0 +1,14 @@
+{
+  "title": "To-Do App Monitoring",
+  "panels": [
+    {
+      "title": "CPU Usage",
+      "type": "graph",
+      "targets": [
+        {
+          "expr": "rate(container_cpu_usage_seconds_total{container!=\"\",pod!=\"\"}[2m])"
+        }
+      ]
+    }
+  ]
+}
