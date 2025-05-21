@@ -1,0 +1,39 @@
+name: Deploy Latest DockerHub Image to Local K8s
+
+on:
+  push:
+    branches:
+      - master
+
+env:
+  IMAGE_NAME: ike20743/todo-app:latest
+  KUBE_CONFIG_DATA: ${{ secrets.KUBE_CONFIG_DATA }}
+
+jobs:
+  deploy-to-k8s:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v3
+
+      - name: Set up kubectl
+        uses: azure/setup-kubectl@v3
+        with:
+          version: 'v1.26.3'
+
+      - name: Decode and set up kubeconfig
+        run: |
+          echo "${KUBE_CONFIG_DATA}" | base64 --decode > kubeconfig
+          export KUBECONFIG=$PWD/kubeconfig
+
+      - name: Apply Kubernetes manifests
+        run: |
+          kubectl apply -f k8s/
+
+      - name: Force deployment to pull latest image
+        run: |
+          kubectl rollout restart deployment/todo-app
+
+  
+
