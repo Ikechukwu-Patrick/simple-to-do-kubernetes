@@ -19,14 +19,17 @@ jobs:
 
     services:
       localstack:
-        image: localstack/localstack
+        image: localstack/localstack-pro  # Pro version required for ECR/ECS
         ports:
-          - "4566:4566"     # LocalStack core
+          - "4566:4566"     # Core services
           - "4510:4510"     # ECR service
         env:
-          SERVICES: ecr,ecs  # CHANGED FROM SEQUENCE TO MAPPING
-          DEBUG: "1"         # CHANGED FROM SEQUENCE TO MAPPING
-          EAGER_SERVICE_LOADING: "1"  # CHANGED FROM SEQUENCE TO MAPPING
+          SERVICES: ecr,ecs  # Enabled services
+          DEBUG: "1"          # Debug logs
+          LOCALSTACK_APIKEY: ${{ secrets.LOCALSTACK_APIKEY }}  # Your CI Auth Token
+          DOCKER_HOST: unix:///var/run/docker.sock  # Docker socket
+        volumes:
+          - "/var/run/docker.sock:/var/run/docker.sock"  # Required for Docker
 
     steps:
       - name: Checkout code
@@ -70,7 +73,7 @@ jobs:
           cat <<EOF > task-definition.json
           {
             "family": "${{ env.ECS_TASK_DEFINITION }}",
-            "networkMode": "bridge",
+            "networkMode": "awsvpc",
             "containerDefinitions": [
               {
                 "name": "${{ env.ECR_REPO_NAME }}",
@@ -84,13 +87,13 @@ jobs:
                 ],
                 "environment": [
                   {
-                    "name": "SPRING_APPLICATION_JSON",
-                    "value": "{\"server\":{\"port\":${{ env.APP_PORT }}}}"
+                    "name": "SERVER_PORT",
+                    "value": "${{ env.APP_PORT }}"
                   }
                 ]
               }
             ],
-            "requiresCompatibilities": ["EC2"],
+            "requiresCompatibilities": ["FARGATE"],
             "cpu": "256",
             "memory": "512"
           }
@@ -99,23 +102,17 @@ jobs:
             --cli-input-json file://task-definition.json
 
       - name: Run ECS task
-        id: run_task
         run: |
-          TASK_ARN=$(aws --endpoint-url=${{ env.LOCALSTACK_ENDPOINT }} ecs run-task \
+          aws --endpoint-url=${{ env.LOCALSTACK_ENDPOINT }} ecs run-task \
             --cluster ${{ env.ECS_CLUSTER_NAME }} \
             --task-definition ${{ env.ECS_TASK_DEFINITION }} \
-            --launch-type EC2 \
-            --query 'tasks[0].taskArn' \
-            --output text)
-          echo "task_arn=$TASK_ARN" >> $GITHUB_OUTPUT
-          aws --endpoint-url=${{ env.LOCALSTACK_ENDPOINT }} ecs wait tasks-running \
-            --cluster ${{ env.ECS_CLUSTER_NAME }} \
-            --tasks $TASK_ARN
+            --launch-type FARGATE \
+            --network-configuration "awsvpcConfiguration={subnets=[subnet-1234],securityGroups=[sg-1234]}"
 
       # ===== VERIFY DEPLOYMENT =====
       - name: Check application health
         run: |
           echo "Waiting for app to start on port ${{ env.APP_PORT }}..."
-          sleep 15  # Give container time to start
+          sleep 30  # Increased delay for Java app startup
           curl -f http://localhost:${{ env.APP_PORT }}/actuator/health || \
             (echo "Health check failed!"; exit 1)
