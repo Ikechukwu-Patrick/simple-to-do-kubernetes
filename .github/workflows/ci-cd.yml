@@ -24,16 +24,15 @@ jobs:
 
       - name: Decode and set up kubeconfig
         run: |
-          echo "${KUBE_CONFIG_DATA}" | base64 --decode > kubeconfig
-          export KUBECONFIG=$PWD/kubeconfig
+          mkdir -p $HOME/.kube
+          echo "${KUBE_CONFIG_DATA}" | base64 --decode > $HOME/.kube/config
 
       - name: Apply Kubernetes manifests
-        run: |
-          kubectl apply -f k8s/
+        run: kubectl apply -f k8s/
+        env:
+          KUBECONFIG: $HOME/.kube/config
 
       - name: Force deployment to pull latest image
-        run: |
-          kubectl rollout restart deployment/todo-app
-
-  
-
+        run: kubectl rollout restart deployment/todo-app
+        env:
+          KUBECONFIG: $HOME/.kube/config
