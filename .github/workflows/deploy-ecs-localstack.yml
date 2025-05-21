@@ -10,7 +10,7 @@ env:
   ECS_CLUSTER_NAME: todo-cluster
   ECS_TASK_DEFINITION: todo-task
   AWS_DEFAULT_REGION: us-east-1
-  APP_PORT: 8084  # Your Java app's port
+  APP_PORT: 8084
   DOCKERHUB_IMAGE: ike20743/todo-app:latest
 
 jobs:
@@ -19,23 +19,23 @@ jobs:
 
     services:
       localstack:
-        image: localstack/localstack-pro  # Pro version required for ECR/ECS
+        image: localstack/localstack-pro
         ports:
-          - "4566:4566"     # Core services
-          - "4510:4510"     # ECR service
+          - "4566:4566"
+          - "4510:4510"
         env:
-          SERVICES: ecr,ecs  # Enabled services
-          DEBUG: "1"          # Debug logs
-          LOCALSTACK_APIKEY: ${{ secrets.LOCALSTACK_APIKEY }}  # Your CI Auth Token
-          DOCKER_HOST: unix:///var/run/docker.sock  # Docker socket
+          SERVICES: ecr,ecs
+          DEBUG: "1"
+          LOCALSTACK_APIKEY: ${{ secrets.LOCALSTACK_APIKEY }}
+          DOCKER_HOST: unix:///var/run/docker.sock
         volumes:
-          - "/var/run/docker.sock:/var/run/docker.sock"  # Required for Docker
+          - "/var/run/docker.sock:/var/run/docker.sock"
 
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
 
-      # ===== SETUP AWS CLI FOR LOCALSTACK =====
+      # ===== SETUP =====
       - name: Configure AWS CLI
         run: |
           aws configure set aws_access_key_id test
@@ -43,26 +43,28 @@ jobs:
           aws configure set region ${{ env.AWS_DEFAULT_REGION }}
           aws configure set output json
 
-      # ===== PULL LATEST DOCKERHUB IMAGE =====
+      # ===== IMAGE HANDLING =====
       - name: Pull latest Docker Hub image
         run: |
           docker pull ${{ env.DOCKERHUB_IMAGE }}
           docker tag ${{ env.DOCKERHUB_IMAGE }} ${{ env.ECR_REPO_NAME }}:latest
 
-      # ===== PUSH TO LOCALSTACK ECR =====
-      - name: Setup LocalStack ECR
+      - name: Setup ECR repository
         run: |
           aws --endpoint-url=${{ env.LOCALSTACK_ENDPOINT }} ecr create-repository \
             --repository-name ${{ env.ECR_REPO_NAME }} || true
+
+      - name: Login to ECR
+        run: |
           ECR_PASSWORD=$(aws --endpoint-url=${{ env.LOCALSTACK_ENDPOINT }} ecr get-login-password)
           echo $ECR_PASSWORD | docker login --username AWS --password-stdin localhost:4510
 
-      - name: Tag and push to ECR
+      - name: Push to ECR
         run: |
           docker tag ${{ env.ECR_REPO_NAME }}:latest localhost:4510/${{ env.ECR_REPO_NAME }}:latest
           docker push localhost:4510/${{ env.ECR_REPO_NAME }}:latest
 
-      # ===== DEPLOY TO ECS =====
+      # ===== ECS DEPLOYMENT =====
       - name: Create ECS cluster
         run: |
           aws --endpoint-url=${{ env.LOCALSTACK_ENDPOINT }} ecs create-cluster \
@@ -109,10 +111,19 @@ jobs:
             --launch-type FARGATE \
             --network-configuration "awsvpcConfiguration={subnets=[subnet-1234],securityGroups=[sg-1234]}"
 
-      # ===== VERIFY DEPLOYMENT =====
-      - name: Check application health
+      # ===== DEBUGGING =====
+      - name: Check running containers
+        run: docker ps -a
+
+      - name: Check ECS tasks
         run: |
-          echo "Waiting for app to start on port ${{ env.APP_PORT }}..."
-          sleep 30  # Increased delay for Java app startup
-          curl -f http://localhost:${{ env.APP_PORT }}/actuator/health || \
+          aws --endpoint-url=${{ env.LOCALSTACK_ENDPOINT }} ecs list-tasks \
+            --cluster ${{ env.ECS_CLUSTER_NAME }}
+
+      # ===== VERIFICATION =====
+      - name: Verify deployment
+        run: |
+          echo "Waiting for app to start..."
+          sleep 30
+          curl -v http://localhost:${{ env.APP_PORT }}/actuator/health || \
             (echo "Health check failed!"; exit 1)
