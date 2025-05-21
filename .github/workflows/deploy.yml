@@ -1,0 +1,54 @@
+name: Deploy to LocalStack
+
+on:
+  push:
+    branches: [ "master" ]
+
+env:
+  AWS_DEFAULT_REGION: us-east-1
+  LOCALSTACK_ENDPOINT: http://localhost:4566
+  DOCKERHUB_IMAGE: ike20743/todo-app:latest
+
+jobs:
+  terraform:
+    runs-on: ubuntu-latest
+    services:
+      localstack:
+        image: localstack/localstack-pro
+        ports:
+          - "4566:4566"
+          - "4510:4510"
+        env:
+          SERVICES: s3,ec2,eks,iam,ecr,ecs
+          LOCALSTACK_APIKEY: ${{ secrets.LOCALSTACK_APIKEY }}
+          DEBUG: "1"
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@v2
+
+      - name: Terraform Init
+        run: terraform init
+        working-directory: ./terraform
+
+      - name: Terraform Apply
+        run: terraform apply -auto-approve
+        working-directory: ./terraform
+
+      - name: Pull and Push Image
+        run: |
+          docker pull ${{ env.DOCKERHUB_IMAGE }}
+          aws --endpoint-url=${{ env.LOCALSTACK_ENDPOINT }} ecr create-repository --repository-name todo-app || true
+          aws --endpoint-url=${{ env.LOCALSTACK_ENDPOINT }} ecr get-login-password | docker login --username AWS --password-stdin localhost:4510
+          docker tag ${{ env.DOCKERHUB_IMAGE }} localhost:4510/todo-app:latest
+          docker push localhost:4510/todo-app:latest
+
+      - name: Restart ECS Service
+        run: |
+          aws --endpoint-url=${{ env.LOCALSTACK_ENDPOINT }} ecs update-service \
+            --cluster localstack-ecs-cluster \
+            --service todo-service \
+            --force-new-deployment
