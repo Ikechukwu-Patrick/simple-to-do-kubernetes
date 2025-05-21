@@ -1,4 +1,4 @@
-name: Deploy to LocalStack
+name: Deploy to LocalStack ECS
 
 on:
   push:
@@ -8,47 +8,151 @@ env:
   AWS_DEFAULT_REGION: us-east-1
   LOCALSTACK_ENDPOINT: http://localhost:4566
   DOCKERHUB_IMAGE: ike20743/todo-app:latest
+  ECR_REPO_NAME: todo-app
+  ECS_CLUSTER_NAME: localstack-ecs-cluster
+  ECS_SERVICE_NAME: todo-service
 
 jobs:
-  terraform:
+  deploy:
     runs-on: ubuntu-latest
+    timeout-minutes: 20
+
     services:
       localstack:
         image: localstack/localstack-pro
         ports:
-          - "4566:4566"
-          - "4510:4510"
+          - "4566:4566"  # Core services
+          - "4510:4510"  # ECR service
         env:
-          SERVICES: s3,ec2,eks,iam,ecr,ecs
-          LOCALSTACK_APIKEY: ${{ secrets.LOCALSTACK_APIKEY }}
+          SERVICES: ecr,ecs,iam,s3
           DEBUG: "1"
+          LOCALSTACK_APIKEY: ${{ secrets.LOCALSTACK_APIKEY }}
+          DOCKER_HOST: unix:///var/run/docker.sock
+          # Critical fixes below:
+          PERSISTENCE: "0"  # Disable persistence to prevent /tmp conflicts
+          HOST_TMP_FOLDER: "/tmp/localstack-tmp"  # Alternative temp directory
+          INIT_SCRIPTS_PATH: "/dev/null"  # Disable init scripts
+        volumes:
+          - "/var/run/docker.sock:/var/run/docker.sock"
+        options: >-
+          --health-cmd="curl -f http://localhost:4566/_localstack/health || exit 1"
+          --health-interval=10s
+          --health-timeout=5s
+          --health-retries=10
+          --tmpfs /tmp/localstack:rw,exec  # Use tmpfs instead of volume
 
     steps:
-      - name: Checkout
+      - name: Checkout code
         uses: actions/checkout@v4
 
-      - name: Setup Terraform
-        uses: hashicorp/setup-terraform@v2
+      # ===== AWS CREDENTIALS SETUP =====
+      - name: Configure AWS credentials
+        run: |
+          mkdir -p ~/.aws
+          cat <<EOF > ~/.aws/config
+          [default]
+          region = ${{ env.AWS_DEFAULT_REGION }}
+          output = json
+          EOF
+          
+          cat <<EOF > ~/.aws/credentials
+          [default]
+          aws_access_key_id = test
+          aws_secret_access_key = test
+          EOF
 
-      - name: Terraform Init
-        run: terraform init
-        working-directory: ./terraform
+      # ===== WAIT FOR LOCALSTACK =====
+      - name: Verify LocalStack readiness
+        run: |
+          echo "Waiting for LocalStack services..."
+          for i in {1..30}; do
+            if curl -s http://localhost:4566/_localstack/health | grep -q '"ecr": "available"'; then
+              echo "✅ ECR service available"
+              exit 0
+            fi
+            sleep 5
+          done
+          echo "❌ LocalStack failed to start"
+          docker logs $(docker ps -aqf "name=localstack")
+          exit 1
 
-      - name: Terraform Apply
-        run: terraform apply -auto-approve
-        working-directory: ./terraform
-
-      - name: Pull and Push Image
+      # ===== DOCKER IMAGE HANDLING =====
+      - name: Pull from DockerHub
         run: |
           docker pull ${{ env.DOCKERHUB_IMAGE }}
-          aws --endpoint-url=${{ env.LOCALSTACK_ENDPOINT }} ecr create-repository --repository-name todo-app || true
-          aws --endpoint-url=${{ env.LOCALSTACK_ENDPOINT }} ecr get-login-password | docker login --username AWS --password-stdin localhost:4510
-          docker tag ${{ env.DOCKERHUB_IMAGE }} localhost:4510/todo-app:latest
-          docker push localhost:4510/todo-app:latest
+          docker tag ${{ env.DOCKERHUB_IMAGE }} ${{ env.ECR_REPO_NAME }}:latest
 
-      - name: Restart ECS Service
+      - name: Push to LocalStack ECR
         run: |
-          aws --endpoint-url=${{ env.LOCALSTACK_ENDPOINT }} ecs update-service \
-            --cluster localstack-ecs-cluster \
-            --service todo-service \
-            --force-new-deployment
+          aws --endpoint-url=${{ env.LOCALSTACK_ENDPOINT }} ecr create-repository \
+            --repository-name ${{ env.ECR_REPO_NAME }} || echo "Repository exists"
+          
+          ECR_PASSWORD=$(aws --endpoint-url=${{ env.LOCALSTACK_ENDPOINT }} ecr get-login-password)
+          echo $ECR_PASSWORD | docker login --username AWS --password-stdin localhost:4510
+          
+          docker tag ${{ env.ECR_REPO_NAME }}:latest localhost:4510/${{ env.ECR_REPO_NAME }}:latest
+          docker push localhost:4510/${{ env.ECR_REPO_NAME }}:latest
+
+      # ===== ECS DEPLOYMENT =====
+      - name: Deploy to ECS
+        run: |
+          # Register task definition
+          cat <<EOF > task-definition.json
+          {
+            "family": "${{ env.ECS_SERVICE_NAME }}",
+            "networkMode": "awsvpc",
+            "containerDefinitions": [
+              {
+                "name": "${{ env.ECR_REPO_NAME }}",
+                "image": "localhost:4510/${{ env.ECR_REPO_NAME }}:latest",
+                "essential": true,
+                "portMappings": [
+                  {
+                    "containerPort": 8084,
+                    "hostPort": 8084
+                  }
+                ]
+              }
+            ],
+            "requiresCompatibilities": ["FARGATE"],
+            "cpu": "256",
+            "memory": "512"
+          }
+          EOF
+          
+          aws --endpoint-url=${{ env.LOCALSTACK_ENDPOINT }} ecs register-task-definition \
+            --cli-input-json file://task-definition.json
+          
+          # Create service if doesn't exist
+          if ! aws --endpoint-url=${{ env.LOCALSTACK_ENDPOINT }} ecs describe-services \
+            --cluster ${{ env.ECS_CLUSTER_NAME }} \
+            --services ${{ env.ECS_SERVICE_NAME }} &>/dev/null; then
+            aws --endpoint-url=${{ env.LOCALSTACK_ENDPOINT }} ecs create-service \
+              --cluster ${{ env.ECS_CLUSTER_NAME }} \
+              --service-name ${{ env.ECS_SERVICE_NAME }} \
+              --task-definition ${{ env.ECS_SERVICE_NAME }} \
+              --desired-count 1 \
+              --launch-type FARGATE
+          else
+            # Update existing service
+            aws --endpoint-url=${{ env.LOCALSTACK_ENDPOINT }} ecs update-service \
+              --cluster ${{ env.ECS_CLUSTER_NAME }} \
+              --service ${{ env.ECS_SERVICE_NAME }} \
+              --task-definition ${{ env.ECS_SERVICE_NAME }} \
+              --force-new-deployment
+          fi
+
+      # ===== VERIFICATION =====
+      - name: Verify deployment
+        run: |
+          echo "Waiting for service to stabilize..."
+          sleep 30  # Extra time for Java app startup
+          
+          echo "Current ECS tasks:"
+          aws --endpoint-url=${{ env.LOCALSTACK_ENDPOINT }} ecs list-tasks \
+            --cluster ${{ env.ECS_CLUSTER_NAME }} \
+            --service ${{ env.ECS_SERVICE_NAME }}
+          
+          echo "Application health check:"
+          curl -v -f http://localhost:8084/actuator/health || \
+            (echo "❌ Health check failed"; exit 1)
