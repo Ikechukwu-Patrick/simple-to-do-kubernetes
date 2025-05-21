@@ -182,3 +182,6 @@ jobs:
             --tasks $(aws --endpoint-url=${{ env.LOCALSTACK_ENDPOINT }} ecs list-tasks \
               --cluster ${{ env.ECS_CLUSTER_NAME }} \
               --query 'taskArns' --output text)
+
+#          huhokjpjkkpkp
+
