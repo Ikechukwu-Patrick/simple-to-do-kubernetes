@@ -15,8 +15,9 @@ spec:
       containers:
         - name: todo-app
           image: ike20743/todo-app:latest
+          imagePullPolicy: Always  # <-- This forces Kubernetes to check for new images
           ports:
-            - containerPort: 8084  # Updated port to match your app
+            - containerPort: 8084
           env:
             - name: SPRING_DATASOURCE_URL
               value: "jdbc:postgresql://postgres:5432/tododb"
@@ -31,9 +32,9 @@ spec:
                   name: db-secret
                   key: password
             - name: SERVER_PORT
-              value: "8084"  # Explicitly set server port
+              value: "8084"
             - name: MANAGEMENT_SERVER_PORT
-              value: "8084"  # For actuator endpoints
+              value: "8084"
           volumeMounts:
             - name: config-volume
               mountPath: /config
@@ -48,7 +49,7 @@ spec:
             httpGet:
               path: /actuator/health/liveness
               port: 8084
-            initialDelaySeconds: 60  # Give app more time to start
+            initialDelaySeconds: 60
             periodSeconds: 10
             failureThreshold: 3
           readinessProbe:
