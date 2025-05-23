@@ -20,7 +20,6 @@ provider "aws" {
     ecs    = "http://localhost:4566"
     iam    = "http://localhost:4566"
     s3     = "http://localhost:4566"
-    elbv2  = "http://localhost:4566"
   }
 }
 
@@ -45,50 +44,14 @@ resource "aws_iam_role_policy_attachment" "ecs_policy_attachment" {
   policy_arn = "arn:aws:iam::aws:policy/service-role/AmazonECSTaskExecutionRolePolicy"
 }
 
-# ECS Cluster (create new instead of data source)
+# ECS Cluster
 resource "aws_ecs_cluster" "todo_cluster" {
   name = "todo-cluster"
 }
 
-# ECR Repository (create new instead of data source)
+# ECR Repository
 resource "aws_ecr_repository" "todo_repo" {
   name = "my-todo-app"
-}
-
-# Load Balancer
-resource "aws_lb" "todo_alb" {
-  name               = "todo-alb"
-  internal           = false
-  load_balancer_type = "application"
-  subnets            = ["subnet-123456"]
-  security_groups    = ["sg-123456"]
-}
-
-resource "aws_lb_target_group" "todo_tg" {
-  name     = "todo-tg"
-  port     = 8084
-  protocol = "HTTP"
-  vpc_id   = "vpc-123456"
-
-  health_check {
-    path                = "/actuator/health"
-    interval            = 30
-    timeout             = 5
-    healthy_threshold   = 2
-    unhealthy_threshold = 2
-    matcher             = "200"
-  }
-}
-
-resource "aws_lb_listener" "todo_listener" {
-  load_balancer_arn = aws_lb.todo_alb.arn
-  port              = "80"
-  protocol          = "HTTP"
-
-  default_action {
-    type             = "forward"
-    target_group_arn = aws_lb_target_group.todo_tg.arn
-  }
 }
 
 # Task Definition
@@ -123,7 +86,7 @@ resource "aws_ecs_task_definition" "todo_task" {
   }])
 }
 
-# ECS Service
+# ECS Service (without load balancer)
 resource "aws_ecs_service" "todo_service" {
   name            = "todo-service"
   cluster         = aws_ecs_cluster.todo_cluster.id
@@ -131,15 +94,12 @@ resource "aws_ecs_service" "todo_service" {
   desired_count   = 1
   launch_type     = "FARGATE"
 
-  load_balancer {
-    target_group_arn = aws_lb_target_group.todo_tg.arn
-    container_name   = "todo-app"
-    container_port   = 8084
-  }
-
   network_configuration {
     subnets = ["subnet-123456"]
   }
-
-  depends_on = [aws_lb_listener.todo_listener]
+}
+resource "aws_ecs_task_definition" "todo_task" {
+  family                   = "todo-task"
+  network_mode             = "bridge"  # Changed from 'awsvpc'
+  requires_compatibilities = ["FARGATE"]  # Remove if not using Fargate
 }

@@ -1,31 +1,23 @@
-name: Build → Docker Hub → Deploy to LocalStack
+name: To-Do App CI/CD Pipeline
+
 on:
   push:
     branches: [ master ]
-  workflow_dispatch:  # Allows manual triggering
+  pull_request:
+    branches: [ master ]
 
 env:
-  DOCKERHUB_IMAGE: ike20743/todo-app  # Change to your Docker Hub repo
-  IMAGE_TAG: latest                       # Can be modified for versioning
-  ECS_CLUSTER: todo-cluster
-  ECS_SERVICE: todo-service
-  LOCALSTACK_ENDPOINT: http://localhost:4566
+  DOCKER_HUB_USERNAME: ${{ secrets.DOCKER_HUB_USERNAME }}
+  DOCKER_HUB_TOKEN: ${{ secrets.DOCKER_HUB_TOKEN }}
+  KUBE_CONFIG: ${{ secrets.KUBE_CONFIG }}
+  IMAGE_NAME: ike20743/todo-app  # Updated to your Docker Hub username
+  K8S_NAMESPACE: default  # Or your preferred namespace
 
 jobs:
-  build-and-deploy:
+  test:
     runs-on: ubuntu-latest
-    timeout-minutes: 15  # Prevent hanging jobs
-
     steps:
-      # --- STAGE 1: Setup & Build ---
       - uses: actions/checkout@v4
-
-      - name: Cache Maven packages
-        uses: actions/cache@v3
-        with:
-          path: ~/.m2/repository
-          key: ${{ runner.os }}-m2-${{ hashFiles('**/pom.xml') }}
-          restore-keys: ${{ runner.os }}-m2-
 
       - name: Set up JDK 17
         uses: actions/setup-java@v3
@@ -34,10 +26,20 @@ jobs:
           distribution: 'temurin'
           cache: 'maven'
 
-      - name: Build with Maven
-        run: |
-          mvn clean package -DskipTests
-          echo "Build completed successfully"
+      - name: Run unit tests
+        run: ./mvnw test
+
+      - name: Build application
+        run: ./mvnw clean package -DskipTests
+
+  build-and-push:
+    needs: test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@v2
 
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v2
@@ -45,57 +47,68 @@ jobs:
       - name: Login to Docker Hub
         uses: docker/login-action@v2
         with:
-          username: ${{ secrets.DOCKERHUB_USERNAME }}
-          password: ${{ secrets.DOCKERHUB_TOKEN }}
+          username: ${{ secrets.DOCKER_HUB_USERNAME }}
+          password: ${{ secrets.DOCKER_HUB_TOKEN }}
 
-      - name: Build and Push Docker Image
-        run: |
-          docker buildx build \
-            --platform linux/amd64 \
-            -t ${{ env.DOCKERHUB_IMAGE }}:${{ env.IMAGE_TAG }} \
-            -t ${{ env.DOCKERHUB_IMAGE }}:latest \
-            --push .
-          echo "Image pushed to Docker Hub"
+      - name: Extract metadata (tags, labels) for Docker
+        id: meta
+        uses: docker/metadata-action@v4
+        with:
+          images: ${{ env.IMAGE_NAME }}
+          tags: |
+            type=sha
+            type=semver,pattern={{version}}
+            type=ref,event=branch
 
-      # --- STAGE 3: LocalStack Deployment ---
-      - name: Verify LocalStack Health
-        run: |
-          curl -sSf ${{ env.LOCALSTACK_ENDPOINT }}/health | jq -e '.ecs == "running"' || \
-            { echo "LocalStack ECS service not ready"; exit 1; }
+      - name: Build and push Docker image
+        uses: docker/build-push-action@v4
+        with:
+          context: .
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
 
-      - name: Configure AWS CLI
-        run: |
-          aws configure set aws_access_key_id test
-          aws configure set aws_secret_access_key test
-          aws configure set region us-east-1
-          aws configure set default.endpoint_url ${{ env.LOCALSTACK_ENDPOINT }}
+  deploy:
+    needs: build-and-push
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
 
-      - name: Force ECS Deployment
-        run: |
-          MAX_RETRIES=3
-          ATTEMPT=0
-          while [ $ATTEMPT -lt $MAX_RETRIES ]; do
-            if aws ecs update-service \
-              --cluster ${{ env.ECS_CLUSTER }} \
-              --service ${{ env.ECS_SERVICE }} \
-              --force-new-deployment \
-              --endpoint-url ${{ env.LOCALSTACK_ENDPOINT }}; then
-              echo "Deployment triggered successfully"
-              break
-            else
-              ATTEMPT=$((ATTEMPT+1))
-              echo "Attempt $ATTEMPT failed, retrying..."
-              sleep 5
-            fi
-          done
-          [ $ATTEMPT -eq $MAX_RETRIES ] && { echo "Max retries reached"; exit 1; }
+      - name: Install kubectl
+        uses: azure/setup-kubectl@v3
 
-      - name: Verify Deployment
+      - name: Configure kubeconfig
         run: |
-          sleep 10  # Give ECS time to start
-          aws ecs describe-services \
-            --cluster ${{ env.ECS_CLUSTER }} \
-            --services ${{ env.ECS_SERVICE }} \
-            --endpoint-url ${{ env.LOCALSTACK_ENDPOINT }} \
-            --query 'services[0].deployments[0].runningCount' \
-            | grep -q 1 || { echo "Service not running"; exit 1; }
+          mkdir -p ~/.kube
+          echo "$KUBE_CONFIG" > ~/.kube/config
+          chmod 600 ~/.kube/config
+          kubectl version --client
+
+      - name: Deploy to Kubernetes
+        run: |
+          # Apply database resources first
+          kubectl apply -f kubernetes/secret.yaml
+          kubectl apply -f kubernetes/postgres-pvc.yaml
+          kubectl apply -f kubernetes/postgres-deployment.yaml
+          kubectl apply -f kubernetes/postgres-service.yaml
+          
+          # Wait for PostgreSQL to be ready
+          kubectl wait --for=condition=ready pod -l app=postgres \
+            --timeout=300s \
+            --namespace=$K8S_NAMESPACE
+          
+          # Deploy the application
+          kubectl apply -f kubernetes/deployment.yaml
+          kubectl apply -f kubernetes/service.yaml
+          
+          # Verify deployment
+          kubectl rollout status deployment/todo-app \
+            --timeout=300s \
+            --namespace=$K8S_NAMESPACE
+          
+          # Get service info
+          kubectl get services -o wide --namespace=$K8S_NAMESPACE
+          
+          # Optional: Print pod logs for verification
+          kubectl get pods --namespace=$K8S_NAMESPACE
+          kubectl logs -l app=todo-app --namespace=$K8S_NAMESPACE --tail=50
