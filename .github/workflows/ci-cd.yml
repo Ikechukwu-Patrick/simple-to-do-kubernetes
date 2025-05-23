@@ -83,15 +83,20 @@ jobs:
       - name: Install kubectl
         uses: azure/setup-kubectl@v3
 
-      - name: Configure kubeconfig
+      - name: Configure Kubernetes
         run: |
           mkdir -p ~/.kube
-          echo "$KUBE_CONFIG" > ~/.kube/config
+          # Write config and verify format
+          echo "${{ secrets.KUBE_CONFIG }}" > ~/.kube/config
+          cat ~/.kube/config | grep "certificate-authority-data:" && echo "Config looks valid"
+          
+          # Set permissions
           chmod 600 ~/.kube/config
+          
+          # Verify connection
+          kubectl config current-context
           kubectl cluster-info
-
-      - name: Verify cluster access
-        run: kubectl get nodes
+          kubectl get nodes
 
       - name: Deploy database
         run: |
