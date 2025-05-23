@@ -10,14 +10,16 @@ env:
   DOCKER_HUB_USERNAME: ${{ secrets.DOCKER_HUB_USERNAME }}
   DOCKER_HUB_TOKEN: ${{ secrets.DOCKER_HUB_TOKEN }}
   KUBE_CONFIG: ${{ secrets.KUBE_CONFIG }}
-  IMAGE_NAME: ike20743/todo-app  # Updated to your Docker Hub username
-  K8S_NAMESPACE: default  # Or your preferred namespace
+  IMAGE_NAME: ike20743/todo-app
+  K8S_NAMESPACE: default
 
 jobs:
   test:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0  # Required for docker/metadata-action
 
       - name: Set up JDK 17
         uses: actions/setup-java@v3
@@ -25,6 +27,9 @@ jobs:
           java-version: '17'
           distribution: 'temurin'
           cache: 'maven'
+
+      - name: Make mvnw executable
+        run: chmod +x ./mvnw
 
       - name: Run unit tests
         run: ./mvnw test
@@ -37,9 +42,8 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-
-      - name: Set up QEMU
-        uses: docker/setup-qemu-action@v2
+        with:
+          fetch-depth: 0
 
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v2
@@ -50,7 +54,7 @@ jobs:
           username: ${{ secrets.DOCKER_HUB_USERNAME }}
           password: ${{ secrets.DOCKER_HUB_TOKEN }}
 
-      - name: Extract metadata (tags, labels) for Docker
+      - name: Extract metadata
         id: meta
         uses: docker/metadata-action@v4
         with:
@@ -60,13 +64,15 @@ jobs:
             type=semver,pattern={{version}}
             type=ref,event=branch
 
-      - name: Build and push Docker image
+      - name: Build and push
         uses: docker/build-push-action@v4
         with:
           context: .
           push: true
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
 
   deploy:
     needs: build-and-push
@@ -82,33 +88,27 @@ jobs:
           mkdir -p ~/.kube
           echo "$KUBE_CONFIG" > ~/.kube/config
           chmod 600 ~/.kube/config
-          kubectl version --client
+          kubectl cluster-info
 
-      - name: Deploy to Kubernetes
+      - name: Verify cluster access
+        run: kubectl get nodes
+
+      - name: Deploy database
         run: |
-          # Apply database resources first
           kubectl apply -f kubernetes/secret.yaml
           kubectl apply -f kubernetes/postgres-pvc.yaml
           kubectl apply -f kubernetes/postgres-deployment.yaml
           kubectl apply -f kubernetes/postgres-service.yaml
-          
-          # Wait for PostgreSQL to be ready
-          kubectl wait --for=condition=ready pod -l app=postgres \
-            --timeout=300s \
-            --namespace=$K8S_NAMESPACE
-          
-          # Deploy the application
+          kubectl wait --for=condition=ready pod -l app=postgres --timeout=300s
+
+      - name: Deploy application
+        run: |
           kubectl apply -f kubernetes/deployment.yaml
           kubectl apply -f kubernetes/service.yaml
-          
-          # Verify deployment
-          kubectl rollout status deployment/todo-app \
-            --timeout=300s \
-            --namespace=$K8S_NAMESPACE
-          
-          # Get service info
-          kubectl get services -o wide --namespace=$K8S_NAMESPACE
-          
-          # Optional: Print pod logs for verification
-          kubectl get pods --namespace=$K8S_NAMESPACE
-          kubectl logs -l app=todo-app --namespace=$K8S_NAMESPACE --tail=50
+          kubectl rollout status deployment/todo-app --timeout=300s
+
+      - name: Verify deployment
+        run: |
+          kubectl get pods,svc -o wide
+          kubectl logs -l app=todo-app --tail=50
+          echo "Application URL: $(kubectl get svc todo-app-service -o jsonpath='{.status.loadBalancer.ingress[0].ip}')"
