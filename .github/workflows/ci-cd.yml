@@ -7,9 +7,7 @@ on:
 env:
   DOCKER_HUB_USERNAME: ${{ secrets.DOCKER_HUB_USERNAME }}
   DOCKER_HUB_TOKEN: ${{ secrets.DOCKER_HUB_TOKEN }}
-  KUBE_CONFIG_BASE64: ${{ secrets.KUBE_CONFIG_BASE64 }}
   IMAGE_NAME: ike20743/todo-app
-  K8S_NAMESPACE: default
 
 jobs:
   test:
@@ -17,7 +15,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with:
-          fetch-depth: 0  # Required for docker/metadata-action
+          fetch-depth: 0
 
       - name: Set up JDK 17
         uses: actions/setup-java@v3
@@ -71,62 +69,3 @@ jobs:
           labels: ${{ steps.meta.outputs.labels }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
-
-  deploy:
-    needs: build-and-push
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-
-      - name: Install kubectl
-        run: |
-          sudo curl -LO "https://dl.k8s.io/release/$(curl -L -s https://dl.k8s.io/release/stable.txt)/bin/linux/amd64/kubectl"
-          sudo install -o root -g root -m 0755 kubectl /usr/local/bin/kubectl
-          kubectl version --client
-
-      - name: Configure Kubernetes
-        run: |
-          mkdir -p ~/.kube
-          echo "${{ secrets.KUBE_CONFIG_BASE64 }}" | base64 --decode > ~/.kube/config
-          chmod 600 ~/.kube/config
-          
-          # Verify connection
-          kubectl config view
-          kubectl config current-context
-          kubectl cluster-info
-          kubectl get nodes
-
-      - name: Deploy database
-        run: |
-          echo "Applying database configurations..."
-          kubectl apply -f kubernetes/secret.yaml
-          kubectl apply -f kubernetes/postgres-pvc.yaml
-          kubectl apply -f kubernetes/postgres-deployment.yaml
-          kubectl apply -f kubernetes/postgres-service.yaml
-          
-          echo "Waiting for database to be ready..."
-          kubectl wait --for=condition=ready pod -l app=postgres --timeout=300s
-          kubectl get pods -l app=postgres
-
-      - name: Deploy application
-        run: |
-          echo "Deploying application..."
-          kubectl apply -f kubernetes/deployment.yaml
-          kubectl apply -f kubernetes/service.yaml
-          
-          echo "Waiting for rollout to complete..."
-          kubectl rollout status deployment/todo-app --timeout=300s
-
-      - name: Verify deployment
-        run: |
-          echo "Current cluster state:"
-          kubectl get pods,svc,deployments -o wide
-          
-          echo "Application logs:"
-          kubectl logs -l app=todo-app --tail=50
-          
-          echo "Checking service details:"
-          kubectl describe svc todo-app-service
-          
-          echo "Application URL:"
-          echo "http://$(kubectl get svc todo-app-service -o jsonpath='{.status.loadBalancer.ingress[0].ip}'):$(kubectl get svc todo-app-service -o jsonpath='{.spec.ports[0].port}')"
