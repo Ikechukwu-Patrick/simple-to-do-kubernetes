@@ -3,8 +3,7 @@ name: To-Do App CI/CD Pipeline
 on:
   push:
     branches: [ master ]
-  pull_request:
-    branches: [ master ]
+
 
 env:
   DOCKER_HUB_USERNAME: ${{ secrets.DOCKER_HUB_USERNAME }}
@@ -85,7 +84,9 @@ jobs:
           # Install kubectl
           sudo curl -LO "https://dl.k8s.io/release/$(curl -L -s https://dl.k8s.io/release/stable.txt)/bin/linux/amd64/kubectl"
           sudo install -o root -g root -m 0755 kubectl /usr/local/bin/kubectl
+          # Install yq for YAML validation
           sudo snap install yq
+          # Verify installations
           kubectl version --client
           yq --version
 
