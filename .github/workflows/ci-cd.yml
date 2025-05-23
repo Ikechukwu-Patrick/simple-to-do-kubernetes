@@ -7,16 +7,15 @@ on:
 env:
   DOCKER_HUB_USERNAME: ${{ secrets.DOCKER_HUB_USERNAME }}
   DOCKER_HUB_TOKEN: ${{ secrets.DOCKER_HUB_TOKEN }}
-  KUBE_CONFIG_BASE64: ${{ secrets.KUBE_CONFIG_BASE64 }}
   IMAGE_NAME: ike20743/todo-app
-  K8S_NAMESPACE: default
-  KUBECTL_VERSION: v1.29.0  # Pinned version for stability
 
 jobs:
   test:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
 
       - name: Set up JDK 17
         uses: actions/setup-java@v3
@@ -27,13 +26,6 @@ jobs:
 
       - name: Make mvnw executable
         run: chmod +x ./mvnw
-
-      - name: Cache Maven packages
-        uses: actions/cache@v3
-        with:
-          path: ~/.m2
-          key: ${{ runner.os }}-m2-${{ hashFiles('**/pom.xml') }}
-          restore-keys: ${{ runner.os }}-m2-
 
       - name: Run unit tests
         run: ./mvnw test
@@ -47,7 +39,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with:
-          fetch-depth: 0  # Required for Docker metadata action
+          fetch-depth: 0
 
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v2
@@ -65,8 +57,8 @@ jobs:
           images: ${{ env.IMAGE_NAME }}
           tags: |
             type=sha
-            type=ref,event=branch
             type=semver,pattern={{version}}
+            type=ref,event=branch
 
       - name: Build and push
         uses: docker/build-push-action@v4
@@ -77,59 +69,3 @@ jobs:
           labels: ${{ steps.meta.outputs.labels }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
-
-  deploy:
-    needs: build-and-push
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-
-      - name: Install kubectl
-        run: |
-          sudo curl -LO "https://dl.k8s.io/release/${{ env.KUBECTL_VERSION }}/bin/linux/amd64/kubectl"
-          sudo install -o root -g root -m 0755 kubectl /usr/local/bin/kubectl
-          kubectl version --client
-
-      - name: Configure Kubernetes
-        run: |
-          mkdir -p ~/.kube
-          echo "${{ secrets.KUBE_CONFIG_BASE64 }}" > ~/.kube/config.b64
-          base64 -d ~/.kube/config.b64 > ~/.kube/config
-          chmod 600 ~/.kube/config
-          
-          # Validate config
-          kubectl config view
-          kubectl config current-context
-          kubectl cluster-info
-
-      - name: Trigger Rollout
-        run: |
-          # Verify deployment exists first
-          if ! kubectl get deployment todo-app -n ${{ env.K8S_NAMESPACE }}; then
-            echo "::error::Deployment todo-app not found in namespace ${{ env.K8S_NAMESPACE }}"
-            exit 1
-          fi
-          
-          echo "Triggering rollout..."
-          kubectl rollout restart deployment/todo-app -n ${{ env.K8S_NAMESPACE }}
-          
-          echo "Waiting for rollout to complete (timeout: 5m)..."
-          kubectl rollout status deployment/todo-app -n ${{ env.K8S_NAMESPACE }} --timeout=300s
-          
-          echo "Verifying new pods:"
-          kubectl get pods -n ${{ env.K8S_NAMESPACE }} -l app=todo-app -o wide
-          kubectl get deployment/todo-app -n ${{ env.K8S_NAMESPACE }} -o jsonpath='{.spec.template.spec.containers[0].image}'
-
-      - name: Verify Application
-        run: |
-          # Get service URL (if LoadBalancer exists)
-          echo "Service details:"
-          kubectl get svc todo-app-service -n ${{ env.K8S_NAMESPACE }} -o wide || true
-          
-          # For ClusterIP services, use port-forward for verification
-          kubectl port-forward svc/todo-app-service 8080:8084 -n ${{ env.K8S_NAMESPACE }} &
-          sleep 5  # Wait for port-forward to establish
-          
-          echo "Checking application health:"
-          curl -s http://localhost:8080/actuator/health || true
-          pkill -f "kubectl port-forward"
