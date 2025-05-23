@@ -4,11 +4,10 @@ on:
   push:
     branches: [ master ]
 
-
 env:
   DOCKER_HUB_USERNAME: ${{ secrets.DOCKER_HUB_USERNAME }}
   DOCKER_HUB_TOKEN: ${{ secrets.DOCKER_HUB_TOKEN }}
-  KUBE_CONFIG: ${{ secrets.KUBE_CONFIG }}
+  KUBE_CONFIG_BASE64: ${{ secrets.KUBE_CONFIG_BASE64 }}
   IMAGE_NAME: ike20743/todo-app
   K8S_NAMESPACE: default
 
@@ -79,39 +78,19 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Install required tools
+      - name: Install kubectl
         run: |
-          # Install kubectl
           sudo curl -LO "https://dl.k8s.io/release/$(curl -L -s https://dl.k8s.io/release/stable.txt)/bin/linux/amd64/kubectl"
           sudo install -o root -g root -m 0755 kubectl /usr/local/bin/kubectl
-          # Install yq for YAML validation
-          sudo snap install yq
-          # Verify installations
           kubectl version --client
-          yq --version
 
       - name: Configure Kubernetes
         run: |
           mkdir -p ~/.kube
-          echo "Verifying KUBE_CONFIG content..."
-          echo "${{ secrets.KUBE_CONFIG }}" | head -n 10
-          
-          echo "Writing config file..."
-          echo "${{ secrets.KUBE_CONFIG }}" > ~/.kube/config-temp
-          
-          echo "Validating YAML syntax..."
-          if ! yq e '.' ~/.kube/config-temp >/dev/null 2>&1; then
-            echo "ERROR: Invalid YAML detected in kubeconfig"
-            echo "Problem might be in these lines:"
-            cat -n ~/.kube/config-temp | grep -A 5 -B 5 ':'
-            exit 1
-          fi
-          
-          echo "Config looks valid, moving to final location..."
-          mv ~/.kube/config-temp ~/.kube/config
+          echo "${{ secrets.KUBE_CONFIG_BASE64 }}" | base64 --decode > ~/.kube/config
           chmod 600 ~/.kube/config
           
-          echo "Verifying connection..."
+          # Verify connection
           kubectl config view
           kubectl config current-context
           kubectl cluster-info
